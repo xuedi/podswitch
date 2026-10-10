@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/xuedi/podswitch/actions/workflows/ci.yml"><img src="https://github.com/xuedi/podswitch/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/xuedi/podswitch/releases"><img src="https://img.shields.io/badge/version-0.1.0-26a269.svg" alt="Version"></a>
+  <a href="https://github.com/xuedi/podswitch/releases"><img src="https://img.shields.io/badge/version-0.2.0-26a269.svg" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-EUPL_v1.2-26a269.svg" alt="License"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.24+-26a269.svg" alt="Go"></a>
   <img src="https://img.shields.io/badge/deps-stdlib_only-326ce5.svg" alt="Standard library only">
@@ -40,6 +40,9 @@ button for each.
 - **Nothing to install in the cluster.** No CRDs, no operator, no agent. Every Deployment and
   StatefulSet outside the system namespaces is listed, two optional annotations set a nicer name
   and an address.
+- **Can switch the machine on, too.** Optionally, the offline page gets a **Power on** button that
+  runs an action you configure: a request to the server's BMC (iLO, iDRAC), a smart plug or a
+  webhook, or any command.
 - **The page updates in place.** It does not reload. The table is only redrawn when something
   changed, and it has a dark mode and works on a phone.
 
@@ -109,6 +112,46 @@ Annotations on a Deployment or StatefulSet:
 | `podswitch/port: "25565"` | Shown as `<PODSWITCH_HOST>:25565`, where to reach the app |
 | `podswitch/hide: "true"` | Not listed |
 
+## Power on
+
+When the cluster is offline, the page can show a **Power on** button. podswitch does not know how
+your machine is switched on, so you tell it: either an **HTTP request** or a **command**. Without
+either, there is no button.
+
+| Variable | Default | |
+|---|---|---|
+| `PODSWITCH_POWER_ON_URL` | | Send this request on Power on |
+| `PODSWITCH_POWER_ON_METHOD` | `POST` | |
+| `PODSWITCH_POWER_ON_BODY` | empty | Request body |
+| `PODSWITCH_POWER_ON_CONTENT_TYPE` | `application/json` | Sent with a body |
+| `PODSWITCH_POWER_ON_AUTH` | | A file holding `user:password`, sent as Basic auth |
+| `PODSWITCH_POWER_ON_INSECURE` | | `true`: do not verify the TLS certificate (BMCs mostly have self-signed ones) |
+| `PODSWITCH_POWER_ON_CMD` | | Instead of a request: run this with `sh -c` |
+
+A 2xx answer or exit code 0 counts as sent. After that the button stays disabled for 5 minutes,
+because a cold start takes a while and a second press during the boot could switch the machine off
+again. podswitch also refuses a power-on while the cluster is online.
+
+**A server with a BMC** (HPE iLO 5, Dell iDRAC 9, Supermicro, anything with Redfish). Give the BMC
+a user of its own that may only power the server on and off (on iLO: "Login" and "Virtual Power
+and Reset"; without "Login" every API call is refused as if the password were wrong), and put `user:password` into `data/power-on-auth`:
+
+```yaml
+PODSWITCH_POWER_ON_URL: https://192.168.1.11/redfish/v1/Systems/1/Actions/ComputerSystem.Reset/
+PODSWITCH_POWER_ON_BODY: '{"ResetType": "On"}'
+PODSWITCH_POWER_ON_AUTH: /data/power-on-auth
+PODSWITCH_POWER_ON_INSECURE: "true"
+```
+
+Use `"On"`, not `"PushPowerButton"`: on a machine that is already running, `On` does nothing.
+
+**A smart plug**, with the BIOS set to power on after a power loss, e.g. Shelly:
+`PODSWITCH_POWER_ON_URL: http://192.168.1.12/rpc/Switch.Set?id=0&on=true`, `PODSWITCH_POWER_ON_METHOD: GET`.
+
+**A command**, e.g. Wake-on-LAN: `PODSWITCH_POWER_ON_CMD: wakeonlan aa:bb:cc:dd:ee:ff`. The
+published image is only the binary and has no shell, so a command needs the plain binary or an
+image of your own with `sh` and the tool in it (Wake-on-LAN also needs the host network).
+
 ## Behind a reverse proxy, or inside armdash
 
 All of podswitch's links are relative, so it works under any path prefix without configuration.
@@ -126,6 +169,9 @@ on HTTPS. Both are single static Go binaries and run fine on a small ARM board.
   read and scale, only in the namespaces you bound.
 - The switch endpoint refuses anything but replicas 0 or 1, other kinds than Deployments and
   StatefulSets, and hidden namespaces, before calling the API.
+- The power-on action is fixed by the configuration; the page can only trigger it, not change it,
+  and only while the cluster is offline. Keep BMC credentials in a mounted file, not in the
+  environment.
 - The token and CA are files you mount read-only; nothing is written at runtime, so the container
   runs with a read-only root filesystem, as uid 65532, with all capabilities dropped.
 
@@ -136,7 +182,7 @@ just check                                   # gofmt, vet, tests
 just run https://192.168.1.10:6443 data/token data/ca.crt
 ```
 
-The tests run the whole read path, the switch endpoint and the offline case against a fake API
+The tests run the whole read path, the switch and power-on endpoints and the offline case against a fake API
 server; no cluster needed. The page is one HTML file with a small script, embedded in the binary.
 
 ## License

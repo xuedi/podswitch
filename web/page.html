@@ -46,6 +46,10 @@
   <div id="offline" class="card offline" hidden>
     <h1 style="justify-content:center"><span><span class="dot"></span><span class="name">The cluster</span> is offline</span></h1>
     <p class="muted">Switched off, or still booting. This page notices when it is back.</p>
+    <div id="power" hidden>
+      <p><button id="poweron">Power on</button></p>
+      <p class="muted" id="powermsg"></p>
+    </div>
   </div>
 
   <div id="online" hidden>
@@ -82,6 +86,8 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", 
 let lastApps = "";      // the app table is only rebuilt when this changes
 let busy = new Set();   // apps with a click in flight, their button stays disabled
 let clickErr = "";      // the last failed click, shown until the next click
+let powerBusy = false;  // a power-on request in flight
+let powerErr = "";      // the last failed power-on
 
 function render(v) {
   if (v.Name) {
@@ -91,7 +97,16 @@ function render(v) {
   $("ver").textContent = "podswitch " + v.Version;
   $("offline").hidden = v.Online;
   $("online").hidden = !v.Online;
-  if (!v.Online) { lastApps = ""; return; }
+  if (!v.Online) {
+    lastApps = "";
+    $("power").hidden = !v.PowerOn;
+    $("poweron").disabled = powerBusy || !!v.PowerOnSent;
+    $("powermsg").textContent = powerErr ? "Failed: " + powerErr
+      : v.PowerOnSent ? "Power-on sent at " + v.PowerOnSent + ". Booting can take several minutes."
+      : powerBusy ? "Sending…" : "";
+    return;
+  }
+  powerErr = "";
 
   const n = v.Cluster;
   const ready = n.ReadyNodes === n.Nodes ? "online" : n.ReadyNodes + " of " + n.Nodes + " nodes ready";
@@ -144,6 +159,15 @@ $("apps").addEventListener("click", async e => {
     if (!r.ok) clickErr = "Failed: " + (await r.text());
   } catch (e) { clickErr = "Failed: " + e; }
   busy.delete(id); lastApps = "";
+});
+
+$("poweron").addEventListener("click", async () => {
+  powerBusy = true; powerErr = ""; $("poweron").disabled = true;
+  try {
+    const r = await fetch("power-on", {method: "POST"});
+    if (!r.ok) powerErr = await r.text();
+  } catch (e) { powerErr = String(e); }
+  powerBusy = false;
 });
 
 poll();

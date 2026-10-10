@@ -14,6 +14,12 @@ services:
       PODSWITCH_API: https://192.168.1.10:6443
       PODSWITCH_NAME: homelab     # optional, default: the first node's name
       TZ: Europe/Berlin           # optional, for the clock in the header
+      # Optional "Power on" button on the offline page, here through a BMC's Redfish API
+      # (README, "Power on"); data/power-on-auth holds user:password.
+      # PODSWITCH_POWER_ON_URL: https://192.168.1.11/redfish/v1/Systems/1/Actions/ComputerSystem.Reset/
+      # PODSWITCH_POWER_ON_BODY: '{"ResetType": "On"}'
+      # PODSWITCH_POWER_ON_AUTH: /data/power-on-auth
+      # PODSWITCH_POWER_ON_INSECURE: "true"
     volumes:
       - ./data:/data:ro
     read_only: true

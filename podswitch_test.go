@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +154,7 @@ func TestScaleEndpoint(t *testing.T) {
 	k := &kube{api: srv.URL, token: "test-token", http: srv.Client()}
 	cfg := testConfig(srv.URL)
 	snap := newSnapshot(func() View { return k.view(cfg) }, time.Hour, time.Hour)
-	h := routes(cfg, snap, k.scale)
+	h := routes(cfg, snap, k.scale, nil)
 
 	post := func(form url.Values) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", "/scale", strings.NewReader(form.Encode()))
@@ -180,7 +183,7 @@ func TestScaleEndpoint(t *testing.T) {
 		t.Errorf("refused requests must not reach the API: %v", scaled)
 	}
 
-	failing := routes(cfg, snap, func(string, string, string, int) error { return errors.New("forbidden") })
+	failing := routes(cfg, snap, func(string, string, string, int) error { return errors.New("forbidden") }, nil)
 	r := httptest.NewRequest("POST", "/scale", strings.NewReader(ok.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -196,14 +199,15 @@ func TestPageAndState(t *testing.T) {
 	defer srv.Close()
 	k := &kube{api: srv.URL, token: "test-token", http: srv.Client()}
 	cfg := testConfig(srv.URL)
-	h := routes(cfg, newSnapshot(func() View { return k.view(cfg) }, time.Hour, time.Hour), k.scale)
+	h := routes(cfg, newSnapshot(func() View { return k.view(cfg) }, time.Hour, time.Hour), k.scale, nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `fetch("state"`) {
 		t.Errorf("page: %d", w.Code)
 	}
-	if strings.Contains(w.Body.String(), `"/state"`) || strings.Contains(w.Body.String(), `"/scale"`) {
+	if strings.Contains(w.Body.String(), `"/state"`) || strings.Contains(w.Body.String(), `"/scale"`) ||
+		strings.Contains(w.Body.String(), `"/power-on"`) {
 		t.Error("page must use relative URLs only, it runs behind proxy prefixes")
 	}
 	w = httptest.NewRecorder()
@@ -211,5 +215,108 @@ func TestPageAndState(t *testing.T) {
 	var v View
 	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil || !v.Online || len(v.Apps) != 2 || v.Version != version {
 		t.Errorf("state: %v %+v", err, v)
+	}
+}
+
+// offlineKube is a kube whose API server is gone.
+func offlineKube(t *testing.T) *kube {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	client := srv.Client()
+	srv.Close()
+	return &kube{api: srv.URL, token: "x", http: client}
+}
+
+func postPowerOn(h http.Handler) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/power-on", nil))
+	return w
+}
+
+func TestPowerOnRequest(t *testing.T) {
+	var got []string
+	bmc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, _ := r.BasicAuth()
+		b := new(bytes.Buffer)
+		b.ReadFrom(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+user+":"+pass+" "+r.Header.Get("Content-Type")+" "+b.String())
+	}))
+	defer bmc.Close()
+	auth := filepath.Join(t.TempDir(), "auth")
+	os.WriteFile(auth, []byte("podswitch:s3cret\n"), 0o600)
+	power := &powerOn{url: bmc.URL + "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset/", method: "POST",
+		body: `{"ResetType":"On"}`, contentType: "application/json", authFile: auth, insecure: true}
+
+	k := offlineKube(t)
+	cfg := testConfig(k.api)
+	snap := newSnapshot(func() View { return withPower(k.view(cfg), power) }, time.Hour, time.Hour)
+	h := routes(cfg, snap, k.scale, power)
+
+	var v View
+	json.Unmarshal(snap.get(), &v)
+	if !v.PowerOn || v.PowerOnSent != "" {
+		t.Errorf("before: %+v", v)
+	}
+	if w := postPowerOn(h); w.Code != http.StatusNoContent {
+		t.Fatalf("power-on: %d %s", w.Code, w.Body)
+	}
+	want := `POST /redfish/v1/Systems/1/Actions/ComputerSystem.Reset/ podswitch:s3cret application/json {"ResetType":"On"}`
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("BMC got %q", got)
+	}
+	json.Unmarshal(snap.get(), &v)
+	if v.PowerOnSent == "" {
+		t.Error("the view must show that a power-on was sent")
+	}
+	if w := postPowerOn(h); w.Code != http.StatusBadGateway || len(got) != 1 {
+		t.Errorf("second press within the cooldown: %d, BMC calls %d", w.Code, len(got))
+	}
+}
+
+func TestPowerOnRefused(t *testing.T) {
+	var scaled []string
+	srv := fakeAPI(t, &scaled)
+	defer srv.Close()
+	marker := filepath.Join(t.TempDir(), "ran")
+	power := &powerOn{command: "touch " + marker}
+
+	online := &kube{api: srv.URL, token: "test-token", http: srv.Client()}
+	cfg := testConfig(srv.URL)
+	h := routes(cfg, newSnapshot(func() View { return online.view(cfg) }, time.Hour, time.Hour), online.scale, power)
+	if w := postPowerOn(h); w.Code != http.StatusConflict {
+		t.Errorf("cluster online: want 409, got %d", w.Code)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the command must not run while the cluster is online")
+	}
+
+	k := offlineKube(t)
+	h = routes(cfg, newSnapshot(func() View { return k.view(cfg) }, time.Hour, time.Hour), k.scale, nil)
+	if w := postPowerOn(h); w.Code != http.StatusNotFound {
+		t.Errorf("not configured: want 404, got %d", w.Code)
+	}
+}
+
+func TestPowerOnCommand(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	if err := (&powerOn{command: "touch " + marker}).run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("command did not run")
+	}
+	err := (&powerOn{command: "echo no route >&2; exit 3"}).run()
+	if err == nil || !strings.Contains(err.Error(), "no route") {
+		t.Errorf("a failing command must report its output: %v", err)
+	}
+}
+
+func TestLoadPowerOn(t *testing.T) {
+	if p, err := loadPowerOn(); p != nil || err != nil {
+		t.Errorf("unset: %v %v", p, err)
+	}
+	t.Setenv("PODSWITCH_POWER_ON_URL", "https://bmc/")
+	t.Setenv("PODSWITCH_POWER_ON_CMD", "wakeonlan aa:bb")
+	if _, err := loadPowerOn(); err == nil {
+		t.Error("both set must be an error")
 	}
 }

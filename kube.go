@@ -162,13 +162,15 @@ type App struct {
 }
 
 type View struct {
-	Name    string
-	Version string
-	Online  bool
-	Error   string
-	Cluster Cluster
-	Apps    []App
-	Time    string
+	Name        string
+	Version     string
+	Online      bool
+	Error       string
+	Cluster     Cluster
+	Apps        []App
+	Time        string
+	PowerOn     bool   // a power-on action is configured, the offline page shows the button
+	PowerOnSent string // when the last power-on was sent, while it is in the cooldown
 }
 
 // view reads the cluster once. Any failure to list nodes counts as "offline"; later failures
