@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>podswitch</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e5e7eb;
+          --ok: #15803d; --warn: #b45309; --off: #6b7280; --btn: #1d4ed8; --stop: #b91c1c; --err: #fee2e2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1a1f26; --text: #e5e7eb; --muted: #9ca3af; --line: #2a313b;
+            --ok: #4ade80; --warn: #fbbf24; --off: #9ca3af; --btn: #3b82f6; --stop: #ef4444; --err: #3b1d1d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 12px; display: flex; gap: 10px; align-items: baseline; }
+  h1 small { font-weight: normal; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--btn); transition: width .4s ease; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .state { font-weight: 600; }
+  .running { color: var(--ok); } .starting, .stopping { color: var(--warn); } .stopped { color: var(--off); }
+  .muted { color: var(--muted); font-size: 13px; }
+  button { border: 0; border-radius: 6px; padding: 6px 14px; min-width: 64px; color: #fff; background: var(--btn); font: inherit; cursor: pointer; }
+  button.stop { background: var(--stop); }
+  button:disabled { opacity: .5; cursor: default; }
+  .err { padding: 8px 12px; border-radius: 8px; background: var(--err); margin-bottom: 14px; }
+  .offline { text-align: center; padding: 48px 16px; }
+  .offline .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--off); margin-right: 6px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 600px) { .hide-s { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div id="offline" class="card offline" hidden>
+    <h1 style="justify-content:center"><span><span class="dot"></span><span class="name">The cluster</span> is offline</span></h1>
+    <p class="muted">Switched off, or still booting. This page notices when it is back.</p>
+  </div>
+
+  <div id="online" hidden>
+    <h1><span class="name"></span> <small id="sub"></small></h1>
+    <div id="err" class="err" hidden></div>
+    <div class="card stats">
+      <div class="stat"><div class="k">CPU</div>
+        <div class="v"><span id="cpu">-</span> <span class="muted" id="cpucap"></span></div>
+        <div class="bar"><i id="cpubar"></i></div></div>
+      <div class="stat"><div class="k">Memory</div>
+        <div class="v"><span id="mem">-</span> <span class="muted" id="memcap"></span></div>
+        <div class="bar"><i id="membar"></i></div></div>
+      <div class="stat"><div class="k">System</div>
+        <div class="v" style="font-size:14px" id="os"></div><div class="muted" id="kernel"></div></div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>App</th><th>State</th><th class="hide-s">CPU</th><th class="hide-s">Memory</th><th></th></tr></thead>
+        <tbody id="apps"></tbody>
+      </table>
+    </div>
+    <p class="muted">Start/Stop sets the app's replicas to 1/0. <span id="ver"></span></p>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const gib = b => (b / 2 ** 30).toFixed(1) + " GiB";
+const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "-";
+const cores = m => (m / 1000).toFixed(2);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]);
+
+let lastApps = "";      // the app table is only rebuilt when this changes
+let busy = new Set();   // apps with a click in flight, their button stays disabled
+let clickErr = "";      // the last failed click, shown until the next click
+
+function render(v) {
+  if (v.Name) {
+    document.querySelectorAll(".name").forEach(e => e.textContent = v.Name);
+    document.title = v.Name + " · podswitch";
+  }
+  $("ver").textContent = "podswitch " + v.Version;
+  $("offline").hidden = v.Online;
+  $("online").hidden = !v.Online;
+  if (!v.Online) { lastApps = ""; return; }
+
+  const n = v.Cluster;
+  const ready = n.ReadyNodes === n.Nodes ? "online" : n.ReadyNodes + " of " + n.Nodes + " nodes ready";
+  $("sub").textContent = ready + " · " + n.Kubernetes + " · " + v.Time;
+  $("cpu").textContent = pct(n.CPUMilli, n.CPUCapMilli);
+  $("cpucap").textContent = "of " + cores(n.CPUCapMilli) + " cores";
+  $("cpubar").style.width = pct(n.CPUMilli, n.CPUCapMilli);
+  $("mem").textContent = gib(n.Mem);
+  $("memcap").textContent = "of " + gib(n.MemCap);
+  $("membar").style.width = pct(n.Mem, n.MemCap);
+  $("os").textContent = n.Nodes > 1 ? n.Nodes + " nodes" : n.OS;
+  $("kernel").textContent = n.Nodes > 1 ? n.OS : "kernel " + n.Kernel;
+  const err = clickErr || v.Error || "";
+  $("err").textContent = err; $("err").hidden = !err;
+
+  const apps = v.Apps || [];
+  const key = JSON.stringify(apps) + [...busy].join();
+  if (key === lastApps) return;
+  lastApps = key;
+  $("apps").innerHTML = apps.length ? apps.map(a => {
+    const id = a.Namespace + "/" + a.Kind + "/" + a.Name;
+    const off = a.State === "stopped";
+    const start = a.Replicas === 0;
+    return `<tr>
+      <td>${esc(a.Title)}<div class="muted">${esc(a.Namespace)}${a.Address ? " · " + esc(a.Address) : ""}</div></td>
+      <td class="state ${esc(a.State)}">${esc(a.State)}</td>
+      <td class="num hide-s">${off ? "-" : cores(a.CPUMilli)}</td>
+      <td class="num hide-s">${off ? "-" : gib(a.Mem)}</td>
+      <td style="text-align:right"><button class="${start ? "" : "stop"}" data-id="${esc(id)}" data-replicas="${start ? 1 : 0}"
+        ${busy.has(id) ? "disabled" : ""}>${start ? "Start" : "Stop"}</button></td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">No apps.</td></tr>`;
+}
+
+async function poll() {
+  try {
+    const r = await fetch("state", {cache: "no-store"});
+    if (r.ok) render(await r.json());
+  } catch (e) { /* dragon's side unreachable for a moment: keep the last view */ }
+  setTimeout(poll, 500);
+}
+
+$("apps").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-id]");
+  if (!b || b.disabled) return;
+  const id = b.dataset.id, [ns, kind, name] = id.split("/");
+  busy.add(id); b.disabled = true; clickErr = "";
+  try {
+    const r = await fetch("scale", {method: "POST",
+      body: new URLSearchParams({ns, kind, name, replicas: b.dataset.replicas})});
+    if (!r.ok) clickErr = "Failed: " + (await r.text());
+  } catch (e) { clickErr = "Failed: " + e; }
+  busy.delete(id); lastApps = "";
+});
+
+poll();
+</script>
+</body>
+</html>

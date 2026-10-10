@@ -1,0 +1,81 @@
+# podswitch's access to the cluster: a service account with a long-lived token that may
+#   everywhere:                  read nodes, pods, Deployments, StatefulSets and their metrics
+#   in namespaces you choose:    change the replica count (on/off), one RoleBinding each
+# and nothing else: no create, delete, exec, logs, Secrets or ConfigMaps.
+#
+#   kubectl apply -f rbac.yaml
+#   kubectl -n podswitch get secret podswitch-token -o jsonpath='{.data.token}'  | base64 -d > token
+#   kubectl -n podswitch get secret podswitch-token -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podswitch
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: podswitch
+  namespace: podswitch
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: podswitch-token
+  namespace: podswitch
+  annotations:
+    kubernetes.io/service-account.name: podswitch
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: podswitch-read
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: podswitch-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: podswitch-read
+subjects:
+  - kind: ServiceAccount
+    name: podswitch
+    namespace: podswitch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: podswitch-switch
+rules:
+  - apiGroups: [apps]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [get, patch]
+---
+# One RoleBinding per namespace whose apps may be switched on and off. Copy it for each one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: podswitch-switch
+  namespace: games          # <- your app namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: podswitch-switch
+subjects:
+  - kind: ServiceAccount
+    name: podswitch
+    namespace: podswitch

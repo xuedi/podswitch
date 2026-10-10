@@ -1,0 +1,21 @@
+# Run podswitch on any machine that can reach the cluster's API, e.g. a small always-on box,
+# so the page can still say "offline" while the cluster is switched off.
+#   data/token, data/ca.crt   from rbac.yaml (see there)
+name: podswitch
+
+services:
+  podswitch:
+    build: ..                     # or: image: ghcr.io/xuedi/podswitch:latest
+    container_name: podswitch
+    restart: unless-stopped
+    ports:
+      - "8080:8080"               # LAN; use "127.0.0.1:8080:8080" behind a reverse proxy
+    environment:
+      PODSWITCH_API: https://192.168.1.10:6443
+      PODSWITCH_NAME: homelab     # optional, default: the first node's name
+      TZ: Europe/Berlin           # optional, for the clock in the header
+    volumes:
+      - ./data:/data:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
